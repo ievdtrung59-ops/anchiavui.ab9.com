@@ -1,0 +1,4 @@
+{
+  "functions": { "api/read-menu.js": { "maxDuration": 60 } },
+  "headers": [{ "source": "/config.js", "headers": [{ "key": "Cache-Control", "value": "no-cache" }] }]
+}

@@ -1,0 +1,10 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Chỉ cho phép app (đã đăng nhập ẩn danh) đọc/ghi các bảng của Ăn Chia Vui
+    match /{coll}/{docId} {
+      allow read, write: if request.auth != null
+        && coll in ['members','meals','items','payments','pollOptions','votes','polls','menuPhotos'];
+    }
+  }
+}

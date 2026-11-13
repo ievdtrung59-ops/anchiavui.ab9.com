@@ -200,6 +200,7 @@ table.bal td:first-child{text-align:left;white-space:normal}
 <div class="ov hidden" id="modal"><div class="sheet" role="dialog" aria-modal="true"><button class="x" data-act="close" aria-label="Đóng">✕</button><div id="mbody"></div></div></div>
 <div class="toast hidden" id="toast"></div>
 
+<script src="config.js" onerror="this.remove()"></script>
 <script>
 /* ===================== Avatars (nhân vật gốc, phong cách chibi Nhật) ===================== */
 const INK='#2b2340', OL=`stroke="${INK}" stroke-width="2"`;
@@ -247,6 +248,7 @@ const DOW=['CN','T2','T3','T4','T5','T6','T7'];
 const fmtDay=s=>DOW[pYmd(s).getDay()]+' '+fmtD(s);
 const isoWeek=s=>{const d=pYmd(s);d.setDate(d.getDate()+3-((d.getDay()+6)%7));const w1=new Date(d.getFullYear(),0,4);return 1+Math.round(((d-w1)/864e5-3+((w1.getDay()+6)%7))/7)};
 let toastT;function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.remove('hidden');clearTimeout(toastT);toastT=setTimeout(()=>t.classList.add('hidden'),2600)}
+function bannerLink(msg){const b=$('#banner');b.innerHTML=esc(msg)+(APP_URL?` <a class="btn sm pink" style="margin-left:6px" href="${APP_URL}" target="_blank" rel="noopener">Mở app trên claude.ai ↗</a>`:'');b.classList.remove('hidden')}
 function banner(msg){const b=$('#banner');if(!msg){b.classList.add('hidden');return}b.textContent=msg;b.classList.remove('hidden')}
 
 /* ===================== state ===================== */
@@ -273,35 +275,63 @@ async function W(fn,okMsg){
 }
 const col=n=>S.db.collection(n);
 
+const HOSTED=()=>!!(window.FIREBASE_CONFIG&&window.FIREBASE_CONFIG.projectId);
+function loadScript(src){return new Promise((res,rej)=>{const sc=document.createElement('script');sc.src=src;sc.onload=res;sc.onerror=()=>rej(new Error('Không tải được '+src));document.head.appendChild(sc)})}
 async function init(){
   renderTabs();
-  const C=window.claude;
-  if(!C||!C.use){S.offline=true;S.loaded=true;banner('Không có kết nối dữ liệu – hãy mở app từ đường link claude.ai.');render();return}
+  let C=window.claude;
+  if(!(C&&C.use)&&window.self!==window.top&&!HOSTED()){for(let i=0;i<60&&!(C&&C.use);i++){await new Promise(r=>setTimeout(r,100));C=window.claude}}
+  if(!(C&&C.use)&&HOSTED())return initFirebase();
+  if(!C||!C.use){S.offline=true;S.loaded=true;bannerLink('Trang này đang mở ngoài claude.ai nên không có dữ liệu chung.');render();return}
   const timer=setTimeout(()=>{if(!S.loaded){banner('Chưa tải được dữ liệu… kiểm tra mạng hoặc đăng nhập claude.ai.');}},10000);
   let db,user;
   try{[db,user]=await Promise.all([C.use('db'),C.use('user')])}catch(e){}
   S.user=user||null;
-  if(!db){clearTimeout(timer);S.offline=true;S.loaded=true;banner('Bạn cần đăng nhập claude.ai và được chia sẻ quyền để dùng app.');render();return}
+  if(!db){clearTimeout(timer);S.offline=true;S.loaded=true;bannerLink('Chưa kết nối được dữ liệu: cần đăng nhập claude.ai bằng tài khoản đã được chia sẻ app, và mở app trong cửa sổ claude.ai.');render();return}
   S.db=db;
   if(user){
     try{const c=await user.can('data.write');S.canWrite=(c===false)?false:(c===true?true:null)}catch(e){}
     try{S.uid=await user.id()}catch(e){}
   }
   if(S.canWrite===false)banner('Bạn đang ở chế độ chỉ xem. Nhờ người tạo app cấp quyền Contributor/Editor để gọi món.');
-  const COLS=['members','meals','items','payments','pollOptions','votes','polls'];const pending=new Set(COLS);
-  const done=(n,snap)=>{if(!snap.metadata.fromCache&&pending.has(n)){pending.delete(n);if(!pending.size){S.loaded=true;clearTimeout(timer);if(S.canWrite!==false)banner('')}}};
-  const err=e=>{clearTimeout(timer);S.loaded=true;if(e&&e.code==='revoked'){banner('Quyền truy cập đã thay đổi.')}else banner('Mất kết nối dữ liệu. Tải lại trang sau ít phút.');render()};
-  for(const n of COLS){
-    col(n).onSnapshot(snap=>{S[n]=snap.docs.map(d=>({id:d.id,...d.data()}));done(n,snap);render();refreshModal();if(n==='meals'&&S.pendingOpen&&S.meals.some(x=>x.id===S.pendingOpen))openMeal(S.pendingOpen)},err);
-  }
+  startSubs(timer);
   // who am I
   let me=LS.get('acv_me');
   if(S.uid){try{const p=await db.doc(`data/users/${S.uid}/profile`).get();if(p.exists&&p.data().memberId)me=p.data().memberId}catch(e){}}
   S.me=me||null;render();
 }
+function askPin(){
+  return new Promise(res=>{
+    openModal('pin',null,`<h2>🔐 Mã nhóm</h2><p class="note">Nhập mã nhóm để vào app (hỏi người tạo nhóm). Chỉ cần nhập một lần trên máy này.</p>
+      <form data-form="pin"><input class="in" name="pin" autocomplete="off" required placeholder="Mã nhóm" style="margin-top:8px"><button class="btn pink" style="margin-top:12px;width:100%;justify-content:center">Vào app 🍜</button></form>`);
+    $('#modal .x').style.display='none';
+    FORMS.pin=f=>{if(f.pin.value.trim()===String(window.GROUP_PIN)){LS.set('acv_pin',String(window.GROUP_PIN));$('#modal .x').style.display='';S.modal=null;closeModal();res()}else toast('Sai mã rồi 🙈')};
+  });
+}
+async function initFirebase(){
+  S.hosted=true;
+  if(window.GROUP_PIN&&LS.get('acv_pin')!==String(window.GROUP_PIN))await askPin();
+  const timer=setTimeout(()=>{if(!S.loaded)banner('Chưa tải được dữ liệu… kiểm tra mạng.')},10000);
+  try{const V='10.12.2';for(const m of ['app','auth','firestore'])await loadScript(`https://www.gstatic.com/firebasejs/${V}/firebase-${m}-compat.js`)}
+  catch(e){clearTimeout(timer);S.loaded=true;banner('Không tải được thư viện Firebase – kiểm tra mạng rồi tải lại trang.');render();return}
+  try{firebase.initializeApp(window.FIREBASE_CONFIG)}catch(e){}
+  try{const cred=await firebase.auth().signInAnonymously();S.uid=cred.user&&cred.user.uid}
+  catch(e){banner('Firebase chưa bật “Anonymous” trong Authentication → Sign-in method. ('+(e.code||e.message)+')')}
+  S.db=firebase.firestore();S.canWrite=true;
+  startSubs(timer);
+  S.me=LS.get('acv_me')||null;render();
+}
+function startSubs(timer){
+  const COLS=['members','meals','items','payments','pollOptions','votes','polls'];const pending=new Set(COLS);
+  const done=(n,snap)=>{if(!snap.metadata.fromCache&&pending.has(n)){pending.delete(n);if(!pending.size){S.loaded=true;clearTimeout(timer);if(S.canWrite!==false)banner('')}}};
+  const err=e=>{clearTimeout(timer);S.loaded=true;if(e&&e.code==='permission-denied'){banner('Firebase từ chối truy cập – kiểm tra Firestore Rules và Anonymous sign-in.')}else if(e&&e.code==='revoked'){banner('Quyền truy cập đã thay đổi.')}else banner('Mất kết nối dữ liệu. Tải lại trang sau ít phút.');render()};
+  for(const n of COLS){
+    col(n).onSnapshot(snap=>{S[n]=snap.docs.map(d=>({id:d.id,...d.data()}));done(n,snap);render();refreshModal();if(n==='meals'&&S.pendingOpen&&S.meals.some(x=>x.id===S.pendingOpen))openMeal(S.pendingOpen)},err);
+  }
+}
 async function setMe(id){
   S.me=id;LS.set('acv_me',id||'');render();
-  if(S.db&&S.uid){try{await S.db.doc(`data/users/${S.uid}/profile`).set({memberId:id||null})}catch(e){}}
+  if(S.db&&S.uid&&!S.hosted){try{await S.db.doc(`data/users/${S.uid}/profile`).set({memberId:id||null})}catch(e){}}
 }
 
 /* ===================== calculations ===================== */
@@ -540,7 +570,7 @@ function renderReminder(L,tr,meals,spent){
 
 /* ===================== modals ===================== */
 function openModal(type,id,html){S.modal={type,id};$('#mbody').innerHTML=html;$('#modal').classList.remove('hidden');document.body.style.overflow='hidden'}
-function closeModal(){unsubPhotos();S.modal=null;$('#modal').classList.add('hidden');document.body.style.overflow='';if(S._dirty){S._dirty=false;render()}}
+function closeModal(){if(S.modal&&S.modal.type==='pin')return;unsubPhotos();S.modal=null;$('#modal').classList.add('hidden');document.body.style.overflow='';if(S._dirty){S._dirty=false;render()}}
 $('#modal').addEventListener('click',e=>{if(e.target.id==='modal')closeModal()});
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&S.modal)closeModal()});
 
@@ -696,7 +726,16 @@ function subPhotos(id){
   S.photoSub=col('menuPhotos').where('mealId','==',id).onSnapshot(snap=>{S.menuPhotos=snap.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));const m=S.meals.find(x=>x.id===id);if(m&&S.modal&&S.modal.id===id)refreshMenu(m)},()=>{});
 }
 let SAMPLE=null,SAMPLE_IMG=false;
-async function getSample(){if(SAMPLE!==null)return SAMPLE;try{SAMPLE=window.claude?.use?await window.claude.use('sample'):null;if(SAMPLE){const l=await SAMPLE.limits().catch(()=>null);SAMPLE_IMG=!!l?.images;S.imgMax=l?.images?.maxCount||5}}catch(e){SAMPLE=null}return SAMPLE}
+const blobToB64=b=>new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(String(r.result).split(',')[1]);r.onerror=rej;r.readAsDataURL(b)});
+const SERVER_SAMPLE={json:async(prompt,{images})=>{
+  const imgs=await Promise.all([...(images||[])].map(async b=>({media_type:b.type||'image/jpeg',data:await blobToB64(b)})));
+  const r=await fetch(window.AI_ENDPOINT||'/api/read-menu',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,images:imgs})});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok)throw{code:r.status===429?'rate_limited':r.status===501?'not_granted':'upstream_error',message:j.error||('HTTP '+r.status)};
+  const t=String(j.text||'');const a=t.indexOf('['),b=t.lastIndexOf(']');
+  try{return JSON.parse(a>=0&&b>a?t.slice(a,b+1):t)}catch(e){throw{code:'invalid_json',message:'parse',text:t}}
+}};
+async function getSample(){if(SAMPLE!==null)return SAMPLE;if(HOSTED()&&!(window.claude&&window.claude.use)){if(window.AI_ENDPOINT===false)return SAMPLE=null;SAMPLE=SERVER_SAMPLE;SAMPLE_IMG=true;S.imgMax=5;return SAMPLE}try{SAMPLE=window.claude?.use?await window.claude.use('sample'):null;if(SAMPLE){const l=await SAMPLE.limits().catch(()=>null);SAMPLE_IMG=!!l?.images;S.imgMax=l?.images?.maxCount||5}}catch(e){SAMPLE=null}return SAMPLE}
 getSample();
 let AI_STATE='';
 function refreshMenu(m){
@@ -839,7 +878,7 @@ const ACT={
     ics.push('BEGIN:VALARM','ACTION:DISPLAY','DESCRIPTION:Đến giờ quyết toán tiền ăn uống!','TRIGGER:-PT10M','END:VALARM','END:VEVENT','END:VCALENDAR');
     const data=ics.join('\r\n');
     const dl=window.claude?.use?await window.claude.use('downloads'):null;
-    if(!dl){toast('Thiết bị này không tải được file – mở app trên máy tính nhé');return}
+    if(!dl){try{const u=URL.createObjectURL(new Blob([data],{type:'text/calendar'}));const a=document.createElement('a');a.href=u;a.download='nhac-quyet-toan-an-uong.ics';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),4000);toast('Đã tải file lịch ⏰ – mở bằng Outlook')}catch(e){toast('Không tải được file')}return}
     try{await dl.save({filename:'nhac-quyet-toan-an-uong.ics',data});toast('Đã tải file lịch ⏰ – mở bằng Outlook')}catch(e){toast('Đã huỷ tải')}
   },
 };
@@ -879,7 +918,7 @@ document.addEventListener('submit',e=>{const f=e.target;e.preventDefault();const
 /* petals */
 (()=>{const p=$('#petals');for(let i=0;i<9;i++){const d=document.createElement('div');d.className='petal';d.style.left=(Math.random()*100)+'vw';d.style.animationDuration=(9+Math.random()*9)+'s';d.style.animationDelay=(-Math.random()*15)+'s';d.style.transform=`scale(${.6+Math.random()*.7})`;p.appendChild(d)}})();
 
-const APP_URL='https://claude.ai/artifact/AZPeQFY8f5fyvBybFd9fbj';
+const APP_URL=window.APP_URL||(HOSTED()&&/^https?:/.test(location.protocol)?location.origin+location.pathname:'https://claude.ai/artifact/AZPeQFY8f5fyvBybFd9fbj');
 init();
 </script>
 </body>
